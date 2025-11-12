@@ -1,0 +1,35 @@
+# pyproject.toml (Best Practice Version)
+
+[project]
+name = "horse_prediction_v2"
+version = "0.1.0"
+requires-python = ">=3.11,<3.13" 
+dependencies = [
+    # Core libraries needed to run predictions
+    "mlflow",
+    "numpy",
+    "pandas",
+    "psycopg2-binary",
+    "pyarrow>=21.0.0",
+    "scikit-learn",
+    # Model libraries
+    "lightgbm",
+    "xgboost",
+    "catboost",
+]
+
+[project.optional-dependencies]
+dev = [
+    # Libraries for development, analysis, and training
+    "jupyter",
+    "matplotlib",
+    "seaborn",
+    "optuna",
+    "optuna-integration[xgboost, lightgbm, catboost]",
+    "shap>=0.49.1",
+    "requests", # Assuming this is for data gathering/dev
+]
+
+[tool.setuptools]
+packages = ["horse_racing_v2"]
+# ------------------------------
