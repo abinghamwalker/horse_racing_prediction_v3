@@ -29,7 +29,10 @@ PROCESSED_PARQUET_PATH = PROCESSED_DATA_DIR / "processed_race_data.parquet"
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S')
 logger = logging.getLogger(__name__)
 
-# --- All your data processing and validation functions go here ---
+# =============================================================================
+# DATA LOADING FUNCTIONS
+# =============================================================================
+
 def load_and_combine_raw_data(file_list: list[Path]) -> pd.DataFrame:
     """Loads and combines multiple raw CSV files into a single DataFrame."""
     dataframes = []
@@ -49,6 +52,28 @@ def load_and_combine_raw_data(file_list: list[Path]) -> pd.DataFrame:
     return combined_df
 
 
+# =============================================================================
+# COLUMN STANDARDIZATION FUNCTIONS
+# =============================================================================
+
+def log_available_columns(df: pd.DataFrame, stage: str = "current") -> None:
+    """Logs all available columns at a given stage for debugging."""
+    logger.info(f"\nAvailable columns at {stage} stage ({len(df.columns)} total):")
+    
+    # Group columns by common prefixes for easier reading
+    col_groups = {}
+    for col in sorted(df.columns):
+        prefix = col.split('_')[0] if '_' in col else col[:3]
+        if prefix not in col_groups:
+            col_groups[prefix] = []
+        col_groups[prefix].append(col)
+    
+    for prefix, cols in sorted(col_groups.items()):
+        if len(cols) <= 5:
+            logger.info(f"  {prefix}: {', '.join(cols)}")
+        else:
+            logger.info(f"  {prefix}: {', '.join(cols[:5])} ... ({len(cols)} total)")
+
 
 def standardize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     """Converts all column names to a consistent snake_case format."""
@@ -63,6 +88,10 @@ def standardize_column_names(df: pd.DataFrame) -> pd.DataFrame:
     logger.info("Column names standardized.")
     return df
 
+
+# =============================================================================
+# DUPLICATE HANDLING FUNCTIONS
+# =============================================================================
 
 def handle_duplicates(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -86,6 +115,10 @@ def handle_duplicates(df: pd.DataFrame) -> pd.DataFrame:
     
     return df
 
+
+# =============================================================================
+# RACE CLASSIFICATION FUNCTIONS
+# =============================================================================
 
 def classify_race_type(race_type: str) -> str:
     """
@@ -140,6 +173,10 @@ def analyze_race_types(df: pd.DataFrame) -> None:
             logger.info(f"  '{race_type}': {count} occurrences")
 
 
+# =============================================================================
+# RACE ID CREATION FUNCTIONS
+# =============================================================================
+
 def create_race_id(df: pd.DataFrame) -> pd.DataFrame:
     """
     Creates a unique race identifier using only pre-race information.
@@ -170,116 +207,306 @@ def create_race_id(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+# =============================================================================
+# MAIN DATA PROCESSING FUNCTION
+# =============================================================================
+
 def process_foundational_data(df: pd.DataFrame) -> pd.DataFrame:
     """
     Performs foundational processing: creates datetime, race_id, race_category,
-    cleans odds data, and sorts the data.
+    creates target variable 'won', cleans odds data, and sorts the data.
     """
     logger.info("Performing foundational data processing...")
     
     # --- 1. Create primary datetime column ---
-    # Convert date and combine with time to create a full datetime object.
+    logger.info("Creating race_datetime column...")
     df['date_of_race'] = pd.to_datetime(df['date_of_race'], errors='coerce')
+    
+    # Drop rows with invalid dates or missing time
+    initial_count = len(df)
     df.dropna(subset=['date_of_race', 'time'], inplace=True)
+    dropped = initial_count - len(df)
+    if dropped > 0:
+        logger.warning(f"Dropped {dropped} rows with missing date_of_race or time")
     
     df['race_datetime'] = pd.to_datetime(
         df['date_of_race'].dt.date.astype(str) + ' ' + df['time'].astype(str),
         errors='coerce'
     )
+    
+    # Drop rows where race_datetime couldn't be created
+    initial_count = len(df)
     df.dropna(subset=['race_datetime'], inplace=True)
+    dropped = initial_count - len(df)
+    if dropped > 0:
+        logger.warning(f"Dropped {dropped} rows with invalid race_datetime")
     
     # --- 2. Create unique race identifier ---
-    df = create_race_id(df) # Assumes this function is defined
+    df = create_race_id(df)
     
     # --- 3. Engineer a clean race_category ---
     if 'type' in df.columns:
-        df['race_category'] = df['type'].apply(classify_race_type) # Assumes this function is defined
-        analyze_race_types(df) # Assumes this function is defined
+        logger.info("Engineering 'race_category' from raw 'type' column...")
+        df['race_category'] = df['type'].apply(classify_race_type)
+        analyze_race_types(df)
     else:
-        logger.warning("Raw 'type' column not found.")
+        logger.warning("Raw 'type' column not found. Skipping 'race_category' creation.")
 
-    # --- 4. Clean and convert 'forecasted_odds' ---
-    # Replace non-numeric strings with pd.NA.
-    df['forecasted_odds'] = df['forecasted_odds'].replace(
-        ['', 'SCRATCHED', 'N/A', '-'], 
-        pd.NA
-    )
-
-    # Coerce remaining non-numeric values to NaN and convert to nullable float.
-    df['forecasted_odds'] = pd.to_numeric(
-        df['forecasted_odds'],
-        errors='coerce'
-    ).astype('Float64') 
-
-    # --- 5. Sort by time ---
-    df = df.sort_values('race_datetime').reset_index(drop=True)
+    # --- 4. Create 'pos' and 'won' target variables ---
+    # We need to determine finishing position and whether the horse won
+    logger.info("Creating 'pos' and 'won' target variables...")
     
-    logger.info("Foundational processing complete. Data is sorted.")
+    # Check what columns are available for determining winners
+    possible_pos_cols = ['pos', 'position', 'finish_position', 'final_position', 'place']  # Added 'place'
+    possible_win_cols = ['won', 'win', 'winner', 'is_winner']
+    
+    # Also check for conditional winner columns that might help
+    conditional_winner_cols = ['course_winner', 'distance_winner', 'going_winner']
+    
+    pos_col = None
+    for col in possible_pos_cols:
+        if col in df.columns:
+            pos_col = col
+            logger.info(f"  Found position column: '{col}'")
+            break
+    
+    # If we don't have a pos column, try to create it from other indicators
+    if pos_col is None:
+        # Check if we have a direct winner indicator
+        win_col = None
+        for col in possible_win_cols:
+            if col in df.columns:
+                win_col = col
+                logger.info(f"  Found winner indicator column: '{col}'")
+                break
+        
+        if win_col:
+            # Create pos from winner indicator
+            logger.info(f"  Creating 'pos' from '{win_col}' column...")
+            df['pos'] = df[win_col].apply(lambda x: 1 if x in [1, '1', True, 'True', 'true', 'Y', 'yes', 'Yes'] else 99)
+            df['pos'] = pd.to_numeric(df['pos'], errors='coerce')
+            pos_col = 'pos'
+        else:
+            # Check if we have conditional winner columns as last resort
+            available_winner_cols = [col for col in conditional_winner_cols if col in df.columns]
+            
+            if available_winner_cols:
+                # Use the most general winner indicator (prefer in order: course, distance, going)
+                # Since these indicate "did this horse win at this course/distance/going before"
+                # Not "did this horse win THIS race", we can't use them directly
+                logger.warning(f"⚠️  Found conditional winner columns: {available_winner_cols}")
+                logger.warning("  These indicate past performance, not current race results.")
+                logger.warning("  Cannot use these to create 'won' target variable.")
+            
+            # Last resort: look for columns that might indicate results
+            result_cols = [col for col in df.columns if any(keyword in col.lower() for keyword in ['result', 'finish', 'outcome'])]
+            if result_cols:
+                logger.warning(f"⚠️  No standard position column found. Found these result-related columns: {result_cols}")
+                logger.warning("  Please examine your data and update the code to extract position from the appropriate column.")
+            
+            raise ValueError(
+                "Cannot create 'pos' and 'won' target variables: No position or winner indicator column found in data.\n"
+                f"Available columns: {list(df.columns[:20])}...\n"
+                "Expected one of: {pos_cols} or {win_cols}".format(
+                    pos_cols=possible_pos_cols,
+                    win_cols=possible_win_cols
+                )
+            )
+    
+    # Ensure we have a 'pos' column with the standardized name
+    if pos_col != 'pos':
+        df['pos'] = df[pos_col]
+    
+    # Convert pos to numeric, treating non-numeric values as NaN
+    df['pos'] = pd.to_numeric(df['pos'], errors='coerce')
+    
+    # Create binary 'won' column: 1 if position is 1, else 0
+    df['won'] = (df['pos'] == 1).astype(int)
+    
+    # Log distribution
+    total_races = len(df)
+    total_winners = df['won'].sum()
+    total_valid_pos = df['pos'].notna().sum()
+    win_rate = (total_winners / total_races * 100) if total_races > 0 else 0
+    
+    logger.info(f"  Created 'pos' and 'won' target variables:")
+    logger.info(f"    Total entries: {total_races:,}")
+    logger.info(f"    Valid positions: {total_valid_pos:,} ({total_valid_pos/total_races*100:.1f}%)")
+    logger.info(f"    Winners (won=1): {total_winners:,} ({win_rate:.2f}%)")
+    logger.info(f"    Non-winners (won=0): {total_races - total_winners:,} ({100-win_rate:.2f}%)")
+    
+    # Validate that we have winners
+    if total_winners == 0:
+        logger.warning("⚠️  WARNING: No winners found in data! Check 'pos' column values.")
+    
+    # Sanity check: win rate should be roughly 1/avg_field_size
+    if 'runners' in df.columns:
+        avg_field_size = df['runners'].mean()
+        expected_win_rate = (1 / avg_field_size * 100) if avg_field_size > 0 else 0
+        logger.info(f"    Expected win rate (1/avg_field_size): {expected_win_rate:.2f}%")
+        
+        if abs(win_rate - expected_win_rate) > 2:  # More than 2% difference
+            logger.warning(f"⚠️  Win rate differs from expected by {abs(win_rate - expected_win_rate):.2f}%")
+        else:
+            logger.info(f"    ✓ Win rate is consistent with field sizes")
+
+    # --- 5. Clean and convert 'forecasted_odds' ---
+    if 'forecasted_odds' in df.columns:
+        logger.info("Cleaning 'forecasted_odds' column...")
+        
+        # Replace non-numeric strings with pd.NA
+        df['forecasted_odds'] = df['forecasted_odds'].replace(
+            ['', 'SCRATCHED', 'N/A', '-', 'nan', 'NaN'], 
+            pd.NA
+        )
+
+        # Coerce remaining non-numeric values to NaN and convert to nullable float
+        df['forecasted_odds'] = pd.to_numeric(
+            df['forecasted_odds'],
+            errors='coerce'
+        ).astype('Float64')
+        
+        # Log how many were cleaned
+        null_count = df['forecasted_odds'].isnull().sum()
+        if null_count > 0:
+            logger.info(f"  Cleaned 'forecasted_odds': {null_count:,} invalid values set to NaN")
+    else:
+        logger.warning("'forecasted_odds' column not found, skipping odds cleaning.")
+
+    # --- 6. Sort by time to ensure correct chronological order ---
+    logger.info("Sorting data chronologically...")
+    df = df.sort_values(['date_of_race', 'race_datetime', 'race_id']).reset_index(drop=True)
+    
+    logger.info("Foundational processing complete. Data is sorted chronologically.")
     return df
+
+
 # =============================================================================
-# DATA VALIDATION & DOCUMENTATION FUNCTIONS (INCLUDED NOW)
+# DATA VALIDATION FUNCTIONS
 # =============================================================================
 
 def validate_processed_data(df: pd.DataFrame) -> None:
-    """Validates critical data quality requirements before saving."""
+    """
+    Validates critical data quality requirements before saving.
+    Raises ValueError if validation fails.
+    """
     logger.info("Running data quality validation...")
-    critical_cols = ['race_datetime', 'race_id', 'track']
+    
+    # 1. Check for null critical columns
+    critical_cols = ['race_datetime', 'race_id', 'track', 'won']
     for col in critical_cols:
-        if col in df.columns and df[col].isnull().any():
-            raise ValueError(f"Critical column '{col}' has null values")
+        if col in df.columns:
+            null_count = df[col].isnull().sum()
+            if null_count > 0:
+                raise ValueError(f"Critical column '{col}' has {null_count} null values")
+    
+    # 2. Check date range is reasonable
+    if 'race_datetime' in df.columns:
+        min_date = df['race_datetime'].min()
+        max_date = df['race_datetime'].max()
+        
+        logger.info(f"Date range: {min_date} to {max_date}")
+        
+        if min_date < pd.Timestamp('2000-01-01'):
+            logger.warning(f"Suspiciously early date found: {min_date}")
+        if max_date > pd.Timestamp.now() + pd.Timedelta(days=365):
+            logger.warning(f"Future date beyond 1 year found: {max_date}")
+    
+    # 3. Check for data monotonicity (should be sorted)
     if 'race_datetime' in df.columns:
         if not df['race_datetime'].is_monotonic_increasing:
             raise ValueError("Data is not properly sorted by race_datetime")
+    
+    # 4. Validate race_id uniqueness per horse per race
+    if 'race_id' in df.columns and 'horse' in df.columns:
+        duplicates = df.groupby(['race_id', 'horse']).size()
+        if (duplicates > 1).any():
+            dup_count = (duplicates > 1).sum()
+            logger.warning(f"Found {dup_count} race_id+horse duplicates - same horse in same race multiple times")
+    
+    # 5. Validate 'won' target variable
+    if 'won' in df.columns:
+        unique_values = df['won'].unique()
+        if not set(unique_values).issubset({0, 1}):
+            raise ValueError(f"'won' column contains invalid values: {unique_values}")
+        
+        if df['won'].sum() == 0:
+            raise ValueError("'won' column has no winners (all zeros)")
+    
     logger.info("✅ Data quality validation passed")
 
+
 def generate_data_profile(df: pd.DataFrame) -> dict:
-    """Generates a comprehensive data profile for logging."""
+    """Generates a comprehensive data profile for logging and validation."""
     profile = {
-        'total_records': len(df), 'total_columns': len(df.columns),
+        'total_records': len(df),
+        'total_columns': len(df.columns),
         'date_range': (df['race_datetime'].min(), df['race_datetime'].max()) if 'race_datetime' in df.columns else None,
+        'unique_tracks': df['track'].nunique() if 'track' in df.columns else None,
         'unique_races': df['race_id'].nunique() if 'race_id' in df.columns else None,
+        'unique_horses': df['horse'].nunique() if 'horse' in df.columns else None,
+        'total_winners': df['won'].sum() if 'won' in df.columns else None,
+        'win_rate_pct': (df['won'].mean() * 100) if 'won' in df.columns else None,
         'memory_usage_mb': round(df.memory_usage(deep=True).sum() / 1024**2, 2),
+        'race_category_distribution': df['race_category'].value_counts().to_dict() if 'race_category' in df.columns else None,
     }
-    logger.info("\n" + "="*80 + "\nDATA PROFILE SUMMARY\n" + "="*80)
+    
+    logger.info("\n" + "="*80)
+    logger.info("DATA PROFILE SUMMARY")
+    logger.info("="*80)
     for key, value in profile.items():
-        if key == 'date_range' and value: logger.info(f"{key}: {value[0]} to {value[1]}")
-        else: logger.info(f"{key}: {value}")
+        if key == 'date_range' and value:
+            logger.info(f"{key}: {value[0]} to {value[1]}")
+        else:
+            logger.info(f"{key}: {value}")
     logger.info("="*80 + "\n")
+    
     return profile
+
 
 def document_schema(df: pd.DataFrame, output_path: Path) -> pd.DataFrame:
     """Generates and saves schema documentation."""
     logger.info("Generating schema documentation...")
-    schema_info = {
-        'column': df.columns, 'dtype': df.dtypes.astype(str),
-        'null_count': df.isnull().sum(), 'null_pct': (df.isnull().sum() / len(df) * 100).round(2),
-        'unique_count': df.nunique(),
+    
+    schema_doc = {
+        'column': df.columns.tolist(),
+        'dtype': df.dtypes.astype(str).tolist(),
+        'null_count': df.isnull().sum().tolist(),
+        'null_pct': (df.isnull().sum() / len(df) * 100).round(2).tolist(),
+        'unique_count': [df[col].nunique() for col in df.columns],
     }
-    schema_df = pd.DataFrame(schema_info).reset_index(drop=True)
+    
+    schema_df = pd.DataFrame(schema_doc)
     schema_path = output_path.parent / "schema_documentation.csv"
     schema_df.to_csv(schema_path, index=False)
     logger.info(f"Schema documentation saved: {schema_path}")
+    
     return schema_df
+
 
 # =============================================================================
 # FILE SAVING FUNCTIONS
 # =============================================================================
+
 def save_with_versioning(df: pd.DataFrame, base_path: Path) -> Path:
-    """Saves a Parquet file with a timestamped backup for version control."""
+    """Saves parquet with timestamp backup for version control."""
     logger.info(f"Preparing to save output to {base_path.parent}...")
+    
+    # Ensure output directory exists
     base_path.parent.mkdir(parents=True, exist_ok=True)
     
-    # Save the main file
+    # Save main file
     df.to_parquet(base_path, index=False)
     logger.info(f"Saved primary output: {base_path}")
     
-    # Create a timestamped backup
+    # Create timestamped backup
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     backup_path = base_path.parent / f"{base_path.stem}_{timestamp}{base_path.suffix}"
     df.to_parquet(backup_path, index=False)
-    logger.info(f"Created versioned backup: {backup_path.name}")
+    logger.info(f"Created backup: {backup_path.name}")
     
     return base_path
+
 
 # =============================================================================
 # MAIN PIPELINE EXECUTION FUNCTION
@@ -300,6 +527,9 @@ def run_data_pipeline():
         logger.info("STEP 2/5: Standardizing columns...")
         logger.info("="*80)
         standardized_df = standardize_column_names(raw_df)
+        
+        # Log available columns for debugging
+        log_available_columns(standardized_df, "after standardization")
         
         # Step 3: Handle Duplicates
         logger.info("\n" + "="*80)
@@ -329,11 +559,12 @@ def run_data_pipeline():
         schema = document_schema(processed_df, PROCESSED_PARQUET_PATH)
         
         logger.info("\n" + "="*80)
-        logger.info("✅ NOTEBOOK 01 COMPLETE")
+        logger.info("✅ DATA PROCESSING PIPELINE COMPLETE")
         logger.info("="*80)
         logger.info(f"Output: {output_path}")
         logger.info(f"Final shape: {processed_df.shape}")
-        logger.info(f"Date range: {processed_df['race_datetime'].min()} to {processed_df['race_datetime'].max()}")
+        if 'race_datetime' in processed_df.columns:
+            logger.info(f"Date range: {processed_df['race_datetime'].min()} to {processed_df['race_datetime'].max()}")
         logger.info("="*80 + "\n")
         
         return processed_df, schema
@@ -357,14 +588,32 @@ def run_data_pipeline():
 # =============================================================================
 # SCRIPT EXECUTION BLOCK
 # =============================================================================
+
 if __name__ == "__main__":
     """
     This block allows the script to be run directly from the command line,
     e.g., `python src/data_processing.py`.
     """
-    logger.info("Running data processing script as a standalone process...")
+    logger.info("="*80)
+    logger.info("RUNNING DATA PROCESSING PIPELINE")
+    logger.info("="*80)
+    
     try:
-        run_data_pipeline()
-        logger.info("Script finished successfully.")
-    except Exception:
-        logger.error("Script execution failed.")
+        processed_df, schema = run_data_pipeline()
+        
+        logger.info("\n" + "="*80)
+        logger.info("✅ SCRIPT FINISHED SUCCESSFULLY")
+        logger.info("="*80)
+        logger.info(f"Processed {len(processed_df):,} records")
+        logger.info(f"Created {len(processed_df.columns)} columns")
+        
+        # Display sample
+        logger.info("\nSample of processed data (first 5 rows):")
+        print(processed_df.head())
+        
+    except Exception as e:
+        logger.error("\n" + "="*80)
+        logger.error("❌ SCRIPT EXECUTION FAILED")
+        logger.error("="*80)
+        logger.error(f"Error: {e}")
+        raise
