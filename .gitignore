@@ -54,6 +54,7 @@ data/predictions/*.parquet
 data/*
 models/*
 models/local_backup/*
+champion_folder/*
 
 # Models (don't commit large model files)
 production_models/*.pkl
@@ -79,6 +80,9 @@ Thumbs.db
 *.tmp
 *.temp
 *.bak
+
+*.pkl
+
 
 # Miscellaneous
 
