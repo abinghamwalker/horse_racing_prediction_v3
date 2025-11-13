@@ -53,6 +53,7 @@ data/model_ready/*.parquet
 data/predictions/*.parquet
 data/*
 models/*
+models/local_backup/*
 
 # Models (don't commit large model files)
 production_models/*.pkl
