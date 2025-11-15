@@ -1,4 +1,28 @@
 # src/data_processing.py
+#!/usr/bin/env python3
+"""
+Data Processing Pipeline for Horse Racing Data
+
+Usage:
+    python src/data_processing.py
+
+This script performs the initial data loading, cleaning, and preparation steps for
+the horse racing prediction project. It reads raw CSV files, processes them into a
+structured format, and saves the output for downstream feature engineering.
+
+This script:
+1. Loads and combines raw horse racing data from multiple CSV files.
+2. Standardizes column names to snake_case and removes duplicate entries.
+3. Performs foundational cleaning: creates `race_datetime`, a unique `race_id`,
+   and classifies race types (e.g., 'Flat', 'Jumps').
+4. Engineers the target variable 'won' based on finishing position.
+5. Validates data quality and sorts the dataset chronologically.
+6. Saves the cleaned data to a Parquet file and generates a schema document.
+
+Output:
+    - data/01_processed/processed_race_data.parquet
+    - data/01_processed/schema_documentation.csv
+"""
 
 import logging
 import re
@@ -17,7 +41,7 @@ except NameError:
     PROJECT_ROOT = Path(".").resolve().parents[0]
 
 RAW_DATA_DIR = PROJECT_ROOT / "data" / "raw_csv"
-PROCESSED_DATA_DIR = PROJECT_ROOT / "data" / "processed"
+PROCESSED_DATA_DIR = PROJECT_ROOT / "data" / "01_processed"
 
 RAW_CSV_FILES = [
     RAW_DATA_DIR / "horse_race_010120_310525.csv",
